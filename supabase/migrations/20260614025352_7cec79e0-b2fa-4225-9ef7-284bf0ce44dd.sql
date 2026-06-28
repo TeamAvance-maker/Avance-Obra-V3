@@ -1,0 +1,2 @@
+ALTER TABLE public.inventory_counts DROP CONSTRAINT inventory_counts_material_code_fkey;
+ALTER TABLE public.inventory_counts ADD CONSTRAINT inventory_counts_material_code_fkey FOREIGN KEY (material_code) REFERENCES public.materials_v2(code) ON DELETE CASCADE ON UPDATE CASCADE;
