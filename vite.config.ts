@@ -12,4 +12,9 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  // Despliegue fuera de Lovable (Vercel): activamos Nitro con el preset "vercel"
+  // para que genere el servidor (.vercel/output) y el sitio no devuelva 404.
+  // En el sandbox de Lovable este preset se ignora y se usa cloudflare automaticamente,
+  // asi que esto NO afecta tu entorno de Lovable.
+  nitro: { preset: "vercel" },
 });
