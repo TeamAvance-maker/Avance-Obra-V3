@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Minus, Plus, RotateCcw } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronRight, MapPinned, Minus, Plus, RotateCcw } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -8,6 +8,17 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet";
 import { Progress } from "@/components/ui/progress";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { SearchableSelect, type SearchableOption } from "@/components/searchable-select";
 import {
   useSites,
   useValeTypes,
@@ -18,8 +29,15 @@ import {
   useMaterialsV2,
 } from "@/lib/sites-queries";
 import { buildMaps } from "@/lib/sites-compute";
-import { siteProgress, valeBreakdown, STATUS_LABEL } from "@/lib/plano-compute";
-import type { CellStatus, Site, ValeTypeV2 } from "@/lib/sites-types";
+import {
+  siteProgress,
+  valeBreakdown,
+  stageCellStatus,
+  manzanaSummary,
+  STATUS_LABEL,
+  type SiteOverallStatus,
+} from "@/lib/plano-compute";
+import type { CellStatus, Site, ValeStage, ValeTypeV2 } from "@/lib/sites-types";
 import {
   PLANO_REAL_ZONES,
   PLANO_REAL_VIEWBOX,
@@ -34,8 +52,83 @@ const TIPO_COLOR: Record<TipoCasa, string> = {
   B: "#16a34a",
   C: "#9333ea",
 };
+const TONE_TERM = "oklch(0.52 0.07 145)";
+const TONE_EXE = "oklch(0.65 0.09 80)";
+const TONE_SIN = "oklch(0.52 0.10 35)";
+
+// Color vivo por estado cuando hay filtro de vale/etapa (legible sobre la foto del plano)
+const STATUS_FILL: Record<CellStatus, string> = {
+  complete: "#16a34a",
+  partial: "#f59e0b",
+  empty: "#94a3b8",
+  na: "#cbd5e1",
+};
+const STATUS_FROM_CELL: Record<CellStatus, SiteOverallStatus> = {
+  complete: "terminado",
+  partial: "en-ejecucion",
+  empty: "sin-iniciar",
+  na: "na",
+};
 
 const [VW, VH] = PLANO_REAL_VIEWBOX;
+
+type ValeFilter =
+  | { type: "all" }
+  | { type: "vale"; valeTypeId: string }
+  | { type: "stage"; valeTypeId: string; stageId: string };
+type Filters = {
+  vale: ValeFilter;
+  manzana: string;
+  tipo: string;
+  sitio: string;
+  estado: string;
+  overall: "" | SiteOverallStatus;
+};
+
+// Centro de cada zona (centroide de sus 4 vértices)
+function centroid(pts: [number, number][]): [number, number] {
+  let x = 0,
+    y = 0;
+  for (const p of pts) {
+    x += p[0];
+    y += p[1];
+  }
+  return [x / pts.length, y / pts.length];
+}
+
+// Convex hull (monotone chain) para el área clicable de cada manzana
+function convexHull(points: [number, number][]): [number, number][] {
+  const pts = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (pts.length <= 2) return pts;
+  const cross = (o: number[], a: number[], b: number[]) =>
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower: [number, number][] = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0)
+      lower.pop();
+    lower.push(p);
+  }
+  const upper: [number, number][] = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0)
+      upper.pop();
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+// Expande un polígono hacia afuera desde su centroide (margen para el área clicable)
+function expand(poly: [number, number][], m: number): [number, number][] {
+  const c = centroid(poly);
+  return poly.map(([x, y]) => {
+    const dx = x - c[0],
+      dy = y - c[1];
+    const len = Math.hypot(dx, dy) || 1;
+    return [x + (dx / len) * m, y + (dy / len) * m] as [number, number];
+  });
+}
 
 export function PlanoRealSection() {
   const sitesQ = useSites();
@@ -45,6 +138,29 @@ export function PlanoRealSection() {
   const delivQ = useSiteDeliveries();
   const itemsQ = useSiteDeliveryItems();
   const matsQ = useMaterialsV2();
+
+  const [filters, setFilters] = useState<Filters>({
+    vale: { type: "all" },
+    manzana: "",
+    tipo: "",
+    sitio: "",
+    estado: "",
+    overall: "",
+  });
+
+  useEffect(() => {
+    try {
+      const o = sessionStorage.getItem("plano:overall");
+      if (o === "terminado" || o === "en-ejecucion" || o === "sin-iniciar") {
+        setFilters((f) => ({ ...f, overall: o as SiteOverallStatus }));
+        sessionStorage.removeItem("plano:overall");
+      }
+    } catch {}
+  }, []);
+
+  const [selected, setSelected] = useState<
+    { kind: "site"; zone: PlanoRealZone } | { kind: "manzana"; id: string } | null
+  >(null);
 
   const loading =
     sitesQ.isLoading ||
@@ -67,6 +183,7 @@ export function PlanoRealSection() {
   }, [stagesQ.data, reqsQ.data, delivQ.data, itemsQ.data, matsQ.data]);
 
   const valeTypes = vtQ.data ?? [];
+  const valeStages = stagesQ.data ?? [];
 
   const siteByKey = useMemo(() => {
     const m = new Map<string, Site>();
@@ -74,31 +191,163 @@ export function PlanoRealSection() {
     return m;
   }, [sitesQ.data]);
 
+  const stagesByVale = useMemo(() => {
+    const m = new Map<string, ValeStage[]>();
+    for (const s of valeStages) {
+      if (!m.has(s.vale_type_id)) m.set(s.vale_type_id, []);
+      m.get(s.vale_type_id)!.push(s);
+    }
+    for (const arr of m.values()) arr.sort((a, b) => a.stage_number - b.stage_number);
+    return m;
+  }, [valeStages]);
+
+  const selectedValeType = useMemo(() => {
+    if (filters.vale.type === "all") return null;
+    return valeTypes.find((v) => v.id === filters.vale.valeTypeId) ?? null;
+  }, [filters.vale, valeTypes]);
+
+  const selectedStage = useMemo(() => {
+    if (filters.vale.type !== "stage") return null;
+    return valeStages.find((s) => s.id === filters.vale.stageId) ?? null;
+  }, [filters.vale, valeStages]);
+
+  const hasValeFilter = filters.vale.type !== "all";
+
+  // Info por zona (sitio, avance, estado para filtro)
+  const zoneInfo = useMemo(() => {
+    const out = new Map<
+      string,
+      { site: Site | null; pct: number; status: SiteOverallStatus; cell?: CellStatus }
+    >();
+    for (const z of PLANO_REAL_ZONES) {
+      const key = `${z.manzana}-${z.sitio}`;
+      const site = siteByKey.get(key) ?? null;
+      if (!site || !maps) {
+        out.set(key, { site, pct: 0, status: "na" });
+        continue;
+      }
+      const prog = siteProgress(site, valeTypes, maps);
+      let cell: CellStatus | undefined;
+      if (filters.vale.type === "vale" && selectedValeType) {
+        cell = prog.vales.find((x) => x.valeTypeId === selectedValeType.id)?.status ?? "na";
+      } else if (filters.vale.type === "stage" && selectedStage) {
+        cell = stageCellStatus(site, selectedStage, maps);
+      }
+      out.set(key, { site, pct: prog.pct, status: prog.status, cell });
+    }
+    return out;
+  }, [siteByKey, maps, valeTypes, filters.vale, selectedValeType, selectedStage]);
+
+  const isVisible = (z: PlanoRealZone) => {
+    if (filters.sitio && z.sitio !== filters.sitio.trim()) return false;
+    if (filters.manzana && z.manzana !== filters.manzana) return false;
+    if (filters.tipo && z.tipo !== filters.tipo) return false;
+    const info = zoneInfo.get(`${z.manzana}-${z.sitio}`);
+    if (filters.overall) {
+      if (!info?.site) return false;
+      if (info.status !== filters.overall) return false;
+    }
+    if (filters.estado && hasValeFilter) {
+      const st = info?.cell ? STATUS_FROM_CELL[info.cell] : "na";
+      if (st !== filters.estado) return false;
+    }
+    return true;
+  };
+
+  const limpiar = () =>
+    setFilters({ vale: { type: "all" }, manzana: "", tipo: "", sitio: "", estado: "", overall: "" });
+
+  // Áreas clicables de manzana (convex hull de los sitios de cada manzana)
+  const manzanaAreas = useMemo(() => {
+    const byMz = new Map<string, [number, number][]>();
+    for (const z of PLANO_REAL_ZONES) {
+      if (!byMz.has(z.manzana)) byMz.set(z.manzana, []);
+      byMz.get(z.manzana)!.push(...z.pts);
+    }
+    const areas: { id: string; pts: [number, number][] }[] = [];
+    for (const [id, verts] of byMz) areas.push({ id, pts: expand(convexHull(verts), 10) });
+    // Mz1 (perímetro) cubre todo → va al fondo; las internas encima para capturar su clic
+    areas.sort((a, b) => (a.id === "1" ? -1 : b.id === "1" ? 1 : 0));
+    return areas;
+  }, []);
+
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
     for (const z of PLANO_REAL_ZONES) c[z.tipo] = (c[z.tipo] ?? 0) + 1;
     return c;
   }, []);
 
-  const [selected, setSelected] = useState<PlanoRealZone | null>(null);
+  // Estadísticas globales
+  const stats = useMemo(() => {
+    let total = 0,
+      sumPct = 0,
+      term = 0,
+      exe = 0,
+      sin = 0,
+      valesAppl = 0,
+      valesComp = 0;
+    for (const z of PLANO_REAL_ZONES) {
+      const info = zoneInfo.get(`${z.manzana}-${z.sitio}`);
+      if (!info?.site || !maps) continue;
+      total++;
+      const prog = siteProgress(info.site, valeTypes, maps);
+      sumPct += prog.pct;
+      valesAppl += prog.applicable;
+      valesComp += prog.completos;
+      if (prog.status === "terminado") term++;
+      else if (prog.status === "en-ejecucion") exe++;
+      else sin++;
+    }
+    return { total, avancePct: total === 0 ? 0 : Math.round(sumPct / total), term, exe, sin, valesAppl, valesComp };
+  }, [zoneInfo, maps, valeTypes]);
 
-  // ---- Zoom / pan ----
+  const filterStats = useMemo(() => {
+    if (!hasValeFilter) return null;
+    let c = 0, p = 0, e = 0, na = 0;
+    for (const z of PLANO_REAL_ZONES) {
+      const st = zoneInfo.get(`${z.manzana}-${z.sitio}`)?.cell ?? "na";
+      if (st === "complete") c++;
+      else if (st === "partial") p++;
+      else if (st === "empty") e++;
+      else na++;
+    }
+    return { c, p, e, na };
+  }, [zoneInfo, hasValeFilter]);
+
+  const valeSelectValue =
+    filters.vale.type === "all"
+      ? "all"
+      : filters.vale.type === "vale"
+        ? `v:${filters.vale.valeTypeId}`
+        : `s:${filters.vale.stageId}`;
+
+  const onChangeValeSelect = (v: string) => {
+    if (v === "all") setFilters((f) => ({ ...f, vale: { type: "all" }, estado: "" }));
+    else if (v.startsWith("v:")) setFilters((f) => ({ ...f, vale: { type: "vale", valeTypeId: v.slice(2) } }));
+    else if (v.startsWith("s:")) {
+      const stage = valeStages.find((s) => s.id === v.slice(2));
+      if (stage)
+        setFilters((f) => ({ ...f, vale: { type: "stage", valeTypeId: stage.vale_type_id, stageId: stage.id } }));
+    }
+  };
+
+  // ---- Zoom / pan (captura el puntero SOLO al arrastrar; así el clic simple abre la ficha) ----
   const canvasRef = useRef<HTMLDivElement>(null);
-  const stRef = useRef({ scale: 1, tx: 0, ty: 0 });
   const stageRef = useRef<HTMLDivElement>(null);
+  const st = useRef({ scale: 1, tx: 0, ty: 0 });
   const pts = useRef<Map<number, { x: number; y: number }>>(new Map());
   const dragging = useRef(false);
+  const captured = useRef(false);
   const moved = useRef(false);
   const last = useRef({ x: 0, y: 0 });
   const pinch = useRef(0);
-
   const MIN = 1,
-    MAX = 18;
+    MAX = 20;
   const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 
-  function applyTransform() {
-    const c = canvasRef.current;
-    const s = stRef.current;
+  function apply() {
+    const c = canvasRef.current,
+      s = st.current;
     if (c) {
       const w = c.clientWidth,
         h = c.clientHeight;
@@ -113,13 +362,13 @@ export function PlanoRealSection() {
       stageRef.current.style.transform = `translate(${s.tx}px,${s.ty}px) scale(${s.scale})`;
   }
   function zoomAt(cx: number, cy: number, f: number) {
-    const s = stRef.current;
+    const s = st.current;
     const ns = clamp(s.scale * f, MIN, MAX);
     const k = ns / s.scale;
     s.tx = cx - k * (cx - s.tx);
     s.ty = cy - k * (cy - s.ty);
     s.scale = ns;
-    applyTransform();
+    apply();
   }
   function onWheel(e: React.WheelEvent) {
     e.preventDefault();
@@ -128,10 +377,10 @@ export function PlanoRealSection() {
   }
   function onPointerDown(e: React.PointerEvent) {
     pts.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     if (pts.current.size === 1) {
       dragging.current = true;
       moved.current = false;
+      captured.current = false;
       last.current = { x: e.clientX, y: e.clientY };
     } else if (pts.current.size === 2) {
       dragging.current = false;
@@ -154,57 +403,240 @@ export function PlanoRealSection() {
       return;
     }
     if (dragging.current) {
-      const s = stRef.current;
+      const s = st.current;
       const dx = e.clientX - last.current.x,
         dy = e.clientY - last.current.y;
-      if (Math.abs(dx) + Math.abs(dy) > 6) moved.current = true;
-      s.tx += dx;
-      s.ty += dy;
-      last.current = { x: e.clientX, y: e.clientY };
-      applyTransform();
+      if (!moved.current && Math.abs(dx) + Math.abs(dy) > 6) {
+        moved.current = true;
+        // Recién ahora capturamos el puntero (para que el clic simple no se pierda)
+        try {
+          (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+          captured.current = true;
+        } catch {}
+      }
+      if (moved.current) {
+        s.tx += dx;
+        s.ty += dy;
+        last.current = { x: e.clientX, y: e.clientY };
+        apply();
+      }
     }
   }
   function onPointerUp(e: React.PointerEvent) {
+    if (captured.current) {
+      try {
+        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch {}
+    }
     pts.current.delete(e.pointerId);
     if (pts.current.size < 2) pinch.current = 0;
-    if (pts.current.size === 0) dragging.current = false;
+    if (pts.current.size === 0) {
+      dragging.current = false;
+      captured.current = false;
+    }
   }
   function reset() {
-    stRef.current = { scale: 1, tx: 0, ty: 0 };
-    applyTransform();
+    st.current = { scale: 1, tx: 0, ty: 0 };
+    apply();
   }
+  const center = () => [
+    (canvasRef.current?.clientWidth ?? 0) / 2,
+    (canvasRef.current?.clientHeight ?? 0) / 2,
+  ];
 
-  function onZoneClick(z: PlanoRealZone) {
-    if (moved.current) return;
-    setSelected(z);
+  function fillFor(z: PlanoRealZone): { fill: string; opacity: number } {
+    const info = zoneInfo.get(`${z.manzana}-${z.sitio}`);
+    if (!isVisible(z)) return { fill: "#94a3b8", opacity: 0.08 };
+    if (hasValeFilter) {
+      const cell = info?.cell ?? "na";
+      return { fill: STATUS_FILL[cell], opacity: cell === "na" ? 0.18 : 0.55 };
+    }
+    return { fill: TIPO_COLOR[z.tipo], opacity: 0.34 };
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
+      <div className="flex items-center gap-2">
+        <MapPinned className="h-6 w-6 text-primary" />
         <div>
-          <h2 className="font-display text-xl font-semibold">Plano real (interactivo)</h2>
+          <h2 className="text-xl font-semibold">Plano real (interactivo)</h2>
           <p className="text-sm text-muted-foreground">
-            Plano de loteo con las 102 viviendas. Haz clic en una casa para ver sus etapas, entregas
-            y faltantes.
+            Clic en una casa o manzana para ver el detalle. Elige un vale o etapa para colorear por
+            estado.
           </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3 text-xs font-medium">
-          {(["A1", "A2", "B", "C"] as TipoCasa[]).map(
-            (t) =>
-              counts[t] != null && (
-                <span key={t} className="flex items-center gap-1.5">
-                  <i
-                    className="inline-block h-3.5 w-3.5 rounded"
-                    style={{ background: TIPO_COLOR[t] }}
-                  />
-                  {t} · {counts[t]}
-                </span>
-              ),
-          )}
         </div>
       </div>
 
+      {/* Estadísticas generales */}
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4 lg:grid-cols-6">
+        <StatCard label="Total sitios" value={stats.total} />
+        <StatCard label="Avance global" value={`${stats.avancePct}%`} accent="#2563eb" />
+        <StatCard
+          label="Terminados"
+          value={stats.term}
+          accent={TONE_TERM}
+          showDot
+          active={filters.overall === "terminado"}
+          onClick={() => setFilters((f) => ({ ...f, overall: f.overall === "terminado" ? "" : "terminado" }))}
+        />
+        <StatCard
+          label="En ejecución"
+          value={stats.exe}
+          accent={TONE_EXE}
+          showDot
+          active={filters.overall === "en-ejecucion"}
+          onClick={() => setFilters((f) => ({ ...f, overall: f.overall === "en-ejecucion" ? "" : "en-ejecucion" }))}
+        />
+        <StatCard
+          label="Sin iniciar"
+          value={stats.sin}
+          accent={TONE_SIN}
+          showDot
+          active={filters.overall === "sin-iniciar"}
+          onClick={() => setFilters((f) => ({ ...f, overall: f.overall === "sin-iniciar" ? "" : "sin-iniciar" }))}
+        />
+        <StatCard label="Vales completos" value={`${stats.valesComp}/${stats.valesAppl}`} accent="#0ea5e9" />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-muted-foreground">Distribución por tipo:</span>
+        {(["A1", "A2", "B", "C"] as TipoCasa[]).map(
+          (t) =>
+            counts[t] != null && (
+              <Badge key={t} variant="outline" style={{ borderColor: "#0002" }}>
+                <span
+                  className="mr-1 inline-block h-2.5 w-2.5 rounded-sm align-middle"
+                  style={{ background: TIPO_COLOR[t] }}
+                />
+                {t}: {counts[t]}
+              </Badge>
+            ),
+        )}
+        {filterStats && (
+          <>
+            <span className="mx-2 h-3 border-l" />
+            <span className="text-muted-foreground">
+              {selectedStage
+                ? `Etapa "${selectedStage.name}":`
+                : selectedValeType
+                  ? `Vale ${selectedValeType.code}:`
+                  : ""}
+            </span>
+            <Badge style={{ background: "#bbf7d0", color: "#000", borderColor: "#0002" }}>Completo: {filterStats.c}</Badge>
+            <Badge style={{ background: "#fde68a", color: "#000", borderColor: "#0002" }}>Parcial: {filterStats.p}</Badge>
+            <Badge variant="outline" style={{ borderColor: "#0002" }}>Sin entregar: {filterStats.e}</Badge>
+            <Badge variant="outline" style={{ borderColor: "#0002" }}>N/A: {filterStats.na}</Badge>
+          </>
+        )}
+      </div>
+
+      {/* Filtros */}
+      <div className="grid grid-cols-2 gap-2 rounded-2xl border bg-card p-3 md:grid-cols-6">
+        <div className="md:col-span-2">
+          <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+            Vale tipo / Etapa
+          </label>
+          <SearchableSelect
+            value={valeSelectValue}
+            onChange={onChangeValeSelect}
+            placeholder="Todos"
+            searchPlaceholder="Buscar vale o etapa…"
+            options={(() => {
+              const opts: SearchableOption[] = [{ value: "all", label: "Todos" }];
+              for (const vt of valeTypes) {
+                opts.push({ value: `v:${vt.id}`, label: `${vt.code} · ${vt.name}`, keywords: `${vt.code} ${vt.name}` });
+                for (const stg of stagesByVale.get(vt.id) ?? [])
+                  opts.push({
+                    value: `s:${stg.id}`,
+                    label: `   └ E${stg.stage_number} · ${stg.name}`,
+                    hint: `${vt.code} · ${vt.name}`,
+                    keywords: `${vt.code} ${vt.name} ${stg.name} E${stg.stage_number}`,
+                  });
+              }
+              return opts;
+            })()}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+            Estado {hasValeFilter ? "" : "(elige vale)"}
+          </label>
+          <Select
+            value={filters.estado || "all"}
+            onValueChange={(v) => setFilters((f) => ({ ...f, estado: v === "all" ? "" : v }))}
+            disabled={!hasValeFilter}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todos</SelectItem>
+              <SelectItem value="terminado">Completo</SelectItem>
+              <SelectItem value="en-ejecucion">Parcial</SelectItem>
+              <SelectItem value="sin-iniciar">Sin entregar</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+            Manzana
+          </label>
+          <Select
+            value={filters.manzana || "all"}
+            onValueChange={(v) => setFilters((f) => ({ ...f, manzana: v === "all" ? "" : v }))}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todas</SelectItem>
+              {["1", "2", "3", "4", "5"].map((m) => (
+                <SelectItem key={m} value={m}>
+                  Manzana {m}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+            Tipo casa
+          </label>
+          <Select
+            value={filters.tipo || "all"}
+            onValueChange={(v) => setFilters((f) => ({ ...f, tipo: v === "all" ? "" : v }))}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todos</SelectItem>
+              {["A1", "A2", "B", "C"].map((t) => (
+                <SelectItem key={t} value={t}>
+                  {t}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+            Sitio
+          </label>
+          <Input
+            placeholder="Ej: 55"
+            value={filters.sitio}
+            onChange={(e) => setFilters((f) => ({ ...f, sitio: e.target.value }))}
+          />
+        </div>
+        <div className="md:col-span-6 flex justify-end">
+          <Button variant="outline" onClick={limpiar}>
+            Limpiar filtros
+          </Button>
+        </div>
+      </div>
+
+      {/* Plano */}
       <div className="relative overflow-hidden rounded-2xl border bg-card shadow-sm">
         {loading && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-card/70 text-sm text-muted-foreground">
@@ -213,7 +645,7 @@ export function PlanoRealSection() {
         )}
         <div
           ref={canvasRef}
-          className="relative h-[68vh] w-full touch-none overflow-hidden bg-[#fafcff]"
+          className="relative h-[82vh] max-h-[1100px] w-full touch-none overflow-hidden bg-[#fafcff]"
           style={{ cursor: "grab" }}
           onWheel={onWheel}
           onPointerDown={onPointerDown}
@@ -221,32 +653,39 @@ export function PlanoRealSection() {
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
         >
-          <div
-            ref={stageRef}
-            className="absolute inset-0 flex items-center justify-center"
-            style={{ transformOrigin: "0 0" }}
-          >
-            <svg
-              viewBox={`0 0 ${VW} ${VH}`}
-              className="block h-auto max-h-full w-full"
-              xmlns="http://www.w3.org/2000/svg"
-            >
+          <div ref={stageRef} className="absolute inset-0 flex items-center justify-center" style={{ transformOrigin: "0 0" }}>
+            <svg viewBox={`0 0 ${VW} ${VH}`} className="block h-auto max-h-full w-full" xmlns="http://www.w3.org/2000/svg">
               <image href={PLANO_REAL_BG} x="0" y="0" width={VW} height={VH} />
+              {/* Áreas de manzana (clicables, transparentes) */}
+              {manzanaAreas.map((a) => (
+                <polygon
+                  key={`mz-${a.id}`}
+                  points={a.pts.map((p) => p.join(",")).join(" ")}
+                  onClick={() => {
+                    if (moved.current) return;
+                    setSelected({ kind: "manzana", id: a.id });
+                  }}
+                  style={{ fill: "#000", fillOpacity: 0, stroke: "none", cursor: "pointer", pointerEvents: "all" }}
+                />
+              ))}
+              {/* Zonas por sitio (encima de las áreas de manzana) */}
               {PLANO_REAL_ZONES.map((z) => {
                 const id = `${z.manzana}-${z.sitio}`;
-                const sel =
-                  selected && selected.manzana === z.manzana && selected.sitio === z.sitio;
-                const col = TIPO_COLOR[z.tipo];
+                const sel = selected?.kind === "site" && selected.zone.manzana === z.manzana && selected.zone.sitio === z.sitio;
+                const f = fillFor(z);
                 return (
                   <polygon
                     key={id}
                     points={z.pts.map((p) => p.join(",")).join(" ")}
-                    onClick={() => onZoneClick(z)}
+                    onClick={() => {
+                      if (moved.current) return;
+                      setSelected({ kind: "site", zone: z });
+                    }}
                     style={{
-                      fill: col,
-                      stroke: col,
-                      fillOpacity: sel ? 0.75 : 0.34,
-                      strokeWidth: sel ? 7 : 4,
+                      fill: f.fill,
+                      stroke: sel ? "#0f172a" : f.fill,
+                      fillOpacity: sel ? Math.max(0.72, f.opacity) : f.opacity,
+                      strokeWidth: sel ? 8 : 4,
                       cursor: "pointer",
                     }}
                   />
@@ -255,10 +694,10 @@ export function PlanoRealSection() {
             </svg>
           </div>
           <div className="absolute bottom-3 right-3 flex flex-col gap-1.5">
-            <ZoomBtn onClick={() => zoomAt((canvasRef.current?.clientWidth ?? 0) / 2, (canvasRef.current?.clientHeight ?? 0) / 2, 1.4)}>
+            <ZoomBtn onClick={() => zoomAt(center()[0], center()[1], 1.4)}>
               <Plus className="h-4 w-4" />
             </ZoomBtn>
-            <ZoomBtn onClick={() => zoomAt((canvasRef.current?.clientWidth ?? 0) / 2, (canvasRef.current?.clientHeight ?? 0) / 2, 1 / 1.4)}>
+            <ZoomBtn onClick={() => zoomAt(center()[0], center()[1], 1 / 1.4)}>
               <Minus className="h-4 w-4" />
             </ZoomBtn>
             <ZoomBtn onClick={reset}>
@@ -268,15 +707,25 @@ export function PlanoRealSection() {
         </div>
       </div>
 
-      <Sheet open={selected !== null} onOpenChange={(o) => !o && setSelected(null)}>
+      {/* Panel sitio */}
+      <Sheet open={selected?.kind === "site"} onOpenChange={(o) => !o && setSelected(null)}>
         <SheetContent className="w-[460px] max-w-[95vw] overflow-y-auto sm:max-w-[460px]">
-          {selected && (
+          {selected?.kind === "site" && (
             <SitePanel
-              zone={selected}
-              site={siteByKey.get(`${selected.manzana}-${selected.sitio}`) ?? null}
+              zone={selected.zone}
+              site={siteByKey.get(`${selected.zone.manzana}-${selected.zone.sitio}`) ?? null}
               valeTypes={valeTypes}
               maps={maps}
             />
+          )}
+        </SheetContent>
+      </Sheet>
+
+      {/* Panel manzana */}
+      <Sheet open={selected?.kind === "manzana"} onOpenChange={(o) => !o && setSelected(null)}>
+        <SheetContent className="w-[420px] max-w-[95vw] overflow-y-auto sm:max-w-[420px]">
+          {selected?.kind === "manzana" && (
+            <ManzanaPanel id={selected.id} siteByKey={siteByKey} valeTypes={valeTypes} maps={maps} />
           )}
         </SheetContent>
       </Sheet>
@@ -293,6 +742,42 @@ function ZoomBtn({ children, onClick }: { children: React.ReactNode; onClick: ()
     >
       {children}
     </button>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  accent,
+  active,
+  onClick,
+  showDot,
+}: {
+  label: string;
+  value: string | number;
+  accent?: string;
+  active?: boolean;
+  onClick?: () => void;
+  showDot?: boolean;
+}) {
+  const clickable = !!onClick;
+  return (
+    <div
+      onClick={onClick}
+      className={`rounded-xl border bg-card p-3 shadow-sm transition ${
+        clickable ? "cursor-pointer hover:bg-muted/40" : ""
+      } ${active ? "border-primary ring-2 ring-primary" : ""}`}
+    >
+      <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+        {showDot && accent && (
+          <span className="inline-block h-2 w-2 rounded-full" style={{ background: accent }} />
+        )}
+        {label}
+      </div>
+      <div className="mt-1 text-xl font-bold" style={accent ? { color: accent } : undefined}>
+        {value}
+      </div>
+    </div>
   );
 }
 
@@ -369,11 +854,7 @@ function SitePanel({
                       className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-xs"
                     >
                       <span className="flex items-center gap-1.5">
-                        {open ? (
-                          <ChevronDown className="h-3.5 w-3.5" />
-                        ) : (
-                          <ChevronRight className="h-3.5 w-3.5" />
-                        )}
+                        {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                         <b>{vt.code}</b> · {vt.name}
                       </span>
                       <ValeStatusBadge status={v.status} />
@@ -388,6 +869,64 @@ function SitePanel({
               })}
             </ul>
           )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ManzanaPanel({
+  id,
+  siteByKey,
+  valeTypes,
+  maps,
+}: {
+  id: string;
+  siteByKey: Map<string, Site>;
+  valeTypes: ValeTypeV2[];
+  maps: ReturnType<typeof buildMaps> | null;
+}) {
+  const zones = PLANO_REAL_ZONES.filter((z) => z.manzana === id);
+  const progresses = zones.map((z) => {
+    const site = siteByKey.get(`${z.manzana}-${z.sitio}`);
+    if (!site || !maps)
+      return { pct: 0, status: "na" as SiteOverallStatus, vales: [], applicable: 0, completos: 0 };
+    return siteProgress(site, valeTypes, maps);
+  });
+  const sum = manzanaSummary(progresses);
+  const tipos = zones.reduce<Record<string, number>>((acc, z) => {
+    acc[z.tipo] = (acc[z.tipo] ?? 0) + 1;
+    return acc;
+  }, {});
+  return (
+    <>
+      <SheetHeader>
+        <SheetTitle>Manzana {id}</SheetTitle>
+        <SheetDescription>Resumen de avance y distribución</SheetDescription>
+      </SheetHeader>
+      <div className="mt-4 space-y-3">
+        <div>
+          <div className="mb-1 flex justify-between text-xs">
+            <span>Avance promedio</span>
+            <span className="font-semibold">{sum.avancePromedio}%</span>
+          </div>
+          <Progress value={sum.avancePromedio} />
+        </div>
+        <div className="grid grid-cols-2 gap-2 text-sm">
+          <StatCard label="Total sitios" value={sum.total} />
+          <StatCard label="Terminados" value={sum.terminados} accent={TONE_TERM} showDot />
+          <StatCard label="En ejecución" value={sum.enEjecucion} accent={TONE_EXE} showDot />
+          <StatCard label="Sin iniciar" value={sum.sinIniciar} accent={TONE_SIN} showDot />
+        </div>
+        <div>
+          <h4 className="mb-2 text-sm font-semibold">Distribución por tipo</h4>
+          <div className="flex flex-wrap gap-1.5">
+            {Object.entries(tipos).map(([k, v]) => (
+              <Badge key={k} variant="outline">
+                {k}: {v}
+              </Badge>
+            ))}
+          </div>
         </div>
       </div>
     </>
@@ -432,8 +971,7 @@ function ValeDetail({
                   <td className="py-0.5">
                     <b>{it.material?.code ?? "?"}</b>{" "}
                     <span className="text-muted-foreground">
-                      {it.material?.description ?? ""}{" "}
-                      {it.material?.unit ? `(${it.material.unit})` : ""}
+                      {it.material?.description ?? ""} {it.material?.unit ? `(${it.material.unit})` : ""}
                     </span>
                   </td>
                   <td className="text-right tabular-nums">{it.req}</td>
