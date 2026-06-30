@@ -14,7 +14,6 @@ import { MaterialsSection } from "@/sections/materials";
 import { ReceptionsSection } from "@/sections/receptions";
 import { ReportsSection } from "@/sections/reports";
 import { SimulatorSection } from "@/sections/simulator";
-import { PlanoSection } from "@/sections/plano";
 import { UsersSection } from "@/sections/users";
 
 // El Plano Real lleva una imagen de fondo pesada embebida: lo cargamos de forma
@@ -75,8 +74,7 @@ function Index() {
           window.location.href = "/auth";
         }}
       >
-        {effectiveTab === "plano" && <PlanoSection />}
-        {effectiveTab === "planoreal" && (
+        {effectiveTab === "plano" && (
           <Suspense
             fallback={
               <div className="p-6 text-sm text-muted-foreground">Cargando plano…</div>

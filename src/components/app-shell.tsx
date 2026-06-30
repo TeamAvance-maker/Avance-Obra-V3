@@ -9,7 +9,6 @@ import {
   HousePlus,
   LogOut,
   Map as MapIcon,
-  MapPinned,
   Menu as MenuIcon,
   PackagePlus,
   Settings2,
@@ -27,7 +26,6 @@ import { cn } from "@/lib/utils";
 
 export type TabKey =
   | "plano"
-  | "planoreal"
   | "dashboard"
   | "recepciones"
   | "entregas"
@@ -42,7 +40,6 @@ export type TabKey =
 export const TABS: { key: TabKey; label: string; icon: typeof Home }[] = [
   { key: "dashboard", label: "Inicio", icon: Home },
   { key: "plano", label: "Plano", icon: MapIcon },
-  { key: "planoreal", label: "Plano Real", icon: MapPinned },
   { key: "materiales", label: "Materiales", icon: Boxes },
   { key: "recepciones", label: "Recepciones", icon: PackagePlus },
   { key: "entregas", label: "Entregas", icon: Truck },
