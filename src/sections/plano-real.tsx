@@ -379,11 +379,8 @@ export function PlanoRealSection() {
     s.scale = ns;
     apply();
   }
-  function onWheel(e: React.WheelEvent) {
-    e.preventDefault();
-    const r = canvasRef.current!.getBoundingClientRect();
-    zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.18 : 1 / 1.18);
-  }
+  // Zoom con rueda del mouse DESACTIVADO a propósito (PC/tablet): el scroll mueve la página.
+  // El zoom se hace solo con los botones +/− y con pellizco (pinch) en pantalla táctil.
   function onPointerDown(e: React.PointerEvent) {
     pts.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pts.current.size === 1) {
@@ -660,7 +657,6 @@ export function PlanoRealSection() {
           ref={canvasRef}
           className="relative h-[82vh] max-h-[1100px] w-full touch-none overflow-hidden bg-[#fafcff]"
           style={{ cursor: "grab" }}
-          onWheel={onWheel}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
