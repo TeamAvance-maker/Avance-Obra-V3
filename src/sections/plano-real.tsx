@@ -20,6 +20,12 @@ import {
 } from "@/components/ui/select";
 import { SearchableSelect, type SearchableOption } from "@/components/searchable-select";
 import {
+  useTableControls,
+  TableToolbar,
+  SortableTh,
+  TablePagination,
+} from "@/components/data-table";
+import {
   useSites,
   useValeTypes,
   useValeStages,
@@ -161,6 +167,9 @@ export function PlanoRealSection() {
   const [selected, setSelected] = useState<
     { kind: "site"; zone: PlanoRealZone } | { kind: "manzana"; id: string } | null
   >(null);
+  const [detailsOpen, setDetailsOpen] = useState<null | "vale" | "manzana" | "tipo" | "sitio">(
+    null,
+  );
 
   const loading =
     sitesQ.isLoading ||
@@ -556,6 +565,7 @@ export function PlanoRealSection() {
               return opts;
             })()}
           />
+          <VerDetalles onClick={() => setDetailsOpen("vale")} />
         </div>
         <div>
           <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
@@ -597,6 +607,7 @@ export function PlanoRealSection() {
               ))}
             </SelectContent>
           </Select>
+          <VerDetalles onClick={() => setDetailsOpen("manzana")} />
         </div>
         <div>
           <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
@@ -618,6 +629,7 @@ export function PlanoRealSection() {
               ))}
             </SelectContent>
           </Select>
+          <VerDetalles onClick={() => setDetailsOpen("tipo")} />
         </div>
         <div>
           <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
@@ -628,6 +640,7 @@ export function PlanoRealSection() {
             value={filters.sitio}
             onChange={(e) => setFilters((f) => ({ ...f, sitio: e.target.value }))}
           />
+          <VerDetalles onClick={() => setDetailsOpen("sitio")} />
         </div>
         <div className="md:col-span-6 flex justify-end">
           <Button variant="outline" onClick={limpiar}>
@@ -729,7 +742,42 @@ export function PlanoRealSection() {
           )}
         </SheetContent>
       </Sheet>
+
+      {/* Panel "Ver detalles" por dimensión */}
+      <Sheet open={detailsOpen !== null} onOpenChange={(o) => !o && setDetailsOpen(null)}>
+        <SheetContent className="w-screen max-w-full overflow-y-auto sm:max-w-full lg:w-[75vw] lg:max-w-[75vw]">
+          {detailsOpen === "vale" && (
+            <DetallesValePanel
+              sites={sitesQ.data ?? []}
+              valeTypes={valeTypes}
+              valeStages={valeStages}
+              maps={maps}
+            />
+          )}
+          {detailsOpen === "manzana" && (
+            <DetallesManzanaPanel sites={sitesQ.data ?? []} valeTypes={valeTypes} maps={maps} />
+          )}
+          {detailsOpen === "tipo" && (
+            <DetallesTipoPanel sites={sitesQ.data ?? []} valeTypes={valeTypes} maps={maps} />
+          )}
+          {detailsOpen === "sitio" && (
+            <DetallesSitioPanel sites={sitesQ.data ?? []} valeTypes={valeTypes} maps={maps} />
+          )}
+        </SheetContent>
+      </Sheet>
     </div>
+  );
+}
+
+function VerDetalles({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="mt-1 text-[10.5px] font-medium text-primary hover:underline"
+    >
+      Ver detalles →
+    </button>
   );
 }
 
@@ -1005,5 +1053,502 @@ function ValeStatusBadge({ status }: { status: CellStatus }) {
     <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${v.cls}`}>
       {v.label}
     </span>
+  );
+}
+
+// ============================================================
+// Paneles "Ver detalles" por dimensión (portados del plano viejo)
+// ============================================================
+
+type Maps = ReturnType<typeof buildMaps>;
+
+function statusTone(s: SiteOverallStatus): string {
+  return s === "terminado"
+    ? TONE_TERM
+    : s === "en-ejecucion"
+      ? TONE_EXE
+      : s === "sin-iniciar"
+        ? TONE_SIN
+        : "var(--muted-foreground)";
+}
+
+// Cuenta de líneas de material (etapa × material) requeridas y cumplidas para un sitio.
+function siteLineCounts(
+  site: Site,
+  maps: Maps,
+  opts?: { stageIds?: Iterable<string> },
+): { done: number; total: number } {
+  let done = 0;
+  let total = 0;
+  const stageIds = opts?.stageIds ?? maps.reqsByStageHouse.keys();
+  for (const sid of stageIds) {
+    const reqs = maps.reqsByStageHouse.get(sid)?.get(site.house_type) ?? [];
+    if (reqs.length === 0) continue;
+    const delivered = maps.deliveredBySiteStageMat.get(site.id)?.get(sid) ?? new Map();
+    for (const r of reqs) {
+      total++;
+      const got = delivered.get(r.material_id) ?? 0;
+      if (got >= r.qty) done++;
+    }
+  }
+  return { done, total };
+}
+
+function ProgressBadge({ pct }: { pct: number }) {
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">
+        <div className="h-full rounded-full" style={{ width: `${pct}%`, background: TONE_TERM }} />
+      </div>
+      <span className="tabular-nums text-[11px] font-semibold">{pct.toFixed(2)}%</span>
+    </div>
+  );
+}
+
+function DetallesValePanel({
+  sites,
+  valeTypes,
+  valeStages,
+  maps,
+}: {
+  sites: Site[];
+  valeTypes: ValeTypeV2[];
+  valeStages: ValeStage[];
+  maps: Maps | null;
+}) {
+  const rows = useMemo(() => {
+    if (!maps) return [];
+    type Row = {
+      key: string;
+      kind: "vale" | "stage";
+      label: string;
+      code: string;
+      aplicable: number;
+      completos: number;
+      parciales: number;
+      sinEntregar: number;
+      pct: number;
+    };
+    const out: Row[] = [];
+    for (const vt of valeTypes) {
+      const stages = valeStages
+        .filter((x) => x.vale_type_id === vt.id)
+        .sort((a, b) => a.stage_number - b.stage_number);
+      const valeStageIds = stages.map((x) => x.id);
+      let aplicable = 0,
+        completos = 0,
+        parciales = 0,
+        sinEntregar = 0;
+      let valeDone = 0,
+        valeTotal = 0;
+      for (const s of sites) {
+        const prog = siteProgress(s, valeTypes, maps);
+        const v = prog.vales.find((x) => x.valeTypeId === vt.id);
+        if (!v || v.status === "na") continue;
+        aplicable++;
+        if (v.status === "complete") completos++;
+        else if (v.status === "partial") parciales++;
+        else sinEntregar++;
+        const lc = siteLineCounts(s, maps, { stageIds: valeStageIds });
+        valeDone += lc.done;
+        valeTotal += lc.total;
+      }
+      out.push({
+        key: `v:${vt.id}`,
+        kind: "vale",
+        label: vt.name,
+        code: vt.code,
+        aplicable,
+        completos,
+        parciales,
+        sinEntregar,
+        pct: valeTotal === 0 ? 0 : (valeDone / valeTotal) * 100,
+      });
+      for (const stg of stages) {
+        let aplS = 0,
+          comS = 0,
+          parS = 0,
+          sinS = 0;
+        let stDone = 0,
+          stTotal = 0;
+        for (const s of sites) {
+          const cs = stageCellStatus(s, stg, maps);
+          if (cs === "na") continue;
+          aplS++;
+          if (cs === "complete") comS++;
+          else if (cs === "partial") parS++;
+          else sinS++;
+          const lc = siteLineCounts(s, maps, { stageIds: [stg.id] });
+          stDone += lc.done;
+          stTotal += lc.total;
+        }
+        out.push({
+          key: `s:${stg.id}`,
+          kind: "stage",
+          label: `   └ E${stg.stage_number} · ${stg.name}`,
+          code: `${vt.code}-E${stg.stage_number}`,
+          aplicable: aplS,
+          completos: comS,
+          parciales: parS,
+          sinEntregar: sinS,
+          pct: stTotal === 0 ? 0 : (stDone / stTotal) * 100,
+        });
+      }
+    }
+    return out;
+  }, [sites, valeTypes, valeStages, maps]);
+
+  const ctrl = useTableControls<(typeof rows)[number]>({
+    data: rows,
+    searchFields: (r) => [r.code, r.label],
+    sortFns: {
+      code: (a, b) => a.code.localeCompare(b.code),
+      label: (a, b) => a.label.localeCompare(b.label),
+      aplicable: (a, b) => a.aplicable - b.aplicable,
+      completos: (a, b) => a.completos - b.completos,
+      parciales: (a, b) => a.parciales - b.parciales,
+      sinEntregar: (a, b) => a.sinEntregar - b.sinEntregar,
+      pct: (a, b) => a.pct - b.pct,
+    },
+    defaultSort: { key: "pct", dir: "desc" },
+    defaultPageSize: 10,
+  });
+
+  return (
+    <>
+      <SheetHeader>
+        <SheetTitle>Resumen por Vale / Etapa</SheetTitle>
+        <SheetDescription>
+          Avance global por cada vale tipo y sus etapas (sobre sitios aplicables).
+        </SheetDescription>
+      </SheetHeader>
+      <div className="mt-4 space-y-2">
+        <TableToolbar ctrl={ctrl} searchPlaceholder="Buscar vale o etapa…" />
+        <div className="overflow-x-auto rounded-lg border">
+          <table className="w-full text-xs">
+            <thead className="bg-muted/40">
+              <tr>
+                <SortableTh ctrl={ctrl} sortKey="code">Código</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="label">Nombre</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="aplicable" align="right">Aplica</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="completos" align="right">Completos</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="parciales" align="right">Parciales</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="sinEntregar" align="right">Sin entr.</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="pct" align="right">% Avance</SortableTh>
+              </tr>
+            </thead>
+            <tbody>
+              {ctrl.visible.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="p-4 text-center text-muted-foreground">
+                    Sin resultados
+                  </td>
+                </tr>
+              ) : (
+                ctrl.visible.map((r) => (
+                  <tr key={r.key} className={`border-t ${r.kind === "stage" ? "bg-muted/20" : ""}`}>
+                    <td className="px-2 py-1.5 font-mono text-[10.5px]">{r.code}</td>
+                    <td className="px-2 py-1.5">{r.label}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{r.aplicable}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: TONE_TERM }}>{r.completos}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: TONE_EXE }}>{r.parciales}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: TONE_SIN }}>{r.sinEntregar}</td>
+                    <td className="px-2 py-1.5 text-right"><div className="flex justify-end"><ProgressBadge pct={r.pct} /></div></td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        <TablePagination ctrl={ctrl} />
+      </div>
+    </>
+  );
+}
+
+function DetallesManzanaPanel({
+  sites,
+  valeTypes,
+  maps,
+}: {
+  sites: Site[];
+  valeTypes: ValeTypeV2[];
+  maps: Maps | null;
+}) {
+  const rows = useMemo(() => {
+    if (!maps) return [];
+    const byMz = new Map<string, { total: number; term: number; exe: number; sin: number; done: number; lines: number }>();
+    for (const s of sites) {
+      const prog = siteProgress(s, valeTypes, maps);
+      const lc = siteLineCounts(s, maps);
+      const k = String(s.manzana);
+      const acc = byMz.get(k) ?? { total: 0, term: 0, exe: 0, sin: 0, done: 0, lines: 0 };
+      acc.total++;
+      acc.done += lc.done;
+      acc.lines += lc.total;
+      if (prog.status === "terminado") acc.term++;
+      else if (prog.status === "en-ejecucion") acc.exe++;
+      else if (prog.status === "sin-iniciar") acc.sin++;
+      byMz.set(k, acc);
+    }
+    return Array.from(byMz.entries()).map(([manzana, v]) => ({
+      manzana,
+      total: v.total,
+      terminados: v.term,
+      enEjecucion: v.exe,
+      sinIniciar: v.sin,
+      pct: v.lines === 0 ? 0 : (v.done / v.lines) * 100,
+    }));
+  }, [sites, valeTypes, maps]);
+
+  const ctrl = useTableControls<(typeof rows)[number]>({
+    data: rows,
+    searchFields: (r) => [r.manzana],
+    sortFns: {
+      manzana: (a, b) => a.manzana.localeCompare(b.manzana, undefined, { numeric: true }),
+      total: (a, b) => a.total - b.total,
+      terminados: (a, b) => a.terminados - b.terminados,
+      enEjecucion: (a, b) => a.enEjecucion - b.enEjecucion,
+      sinIniciar: (a, b) => a.sinIniciar - b.sinIniciar,
+      pct: (a, b) => a.pct - b.pct,
+    },
+    defaultSort: { key: "manzana", dir: "asc" },
+    defaultPageSize: 10,
+  });
+
+  return (
+    <>
+      <SheetHeader>
+        <SheetTitle>Resumen por Manzana (Materiales Entregados)</SheetTitle>
+        <SheetDescription>Avance promedio y conteo de estados por manzana.</SheetDescription>
+      </SheetHeader>
+      <div className="mt-4 space-y-2">
+        <TableToolbar ctrl={ctrl} searchPlaceholder="Buscar manzana…" />
+        <div className="overflow-x-auto rounded-lg border">
+          <table className="w-full text-xs">
+            <thead className="bg-muted/40">
+              <tr>
+                <SortableTh ctrl={ctrl} sortKey="manzana">Manzana</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="total" align="right">Sitios</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="terminados" align="right">Terminados</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="enEjecucion" align="right">En ejec.</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="sinIniciar" align="right">Sin iniciar</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="pct" align="right">% Avance</SortableTh>
+              </tr>
+            </thead>
+            <tbody>
+              {ctrl.visible.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="p-4 text-center text-muted-foreground">Sin resultados</td>
+                </tr>
+              ) : (
+                ctrl.visible.map((r) => (
+                  <tr key={r.manzana} className="border-t">
+                    <td className="px-2 py-1.5 font-semibold">M{r.manzana}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{r.total}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: TONE_TERM }}>{r.terminados}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: TONE_EXE }}>{r.enEjecucion}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: TONE_SIN }}>{r.sinIniciar}</td>
+                    <td className="px-2 py-1.5 text-right"><div className="flex justify-end"><ProgressBadge pct={r.pct} /></div></td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        <TablePagination ctrl={ctrl} />
+      </div>
+    </>
+  );
+}
+
+function DetallesTipoPanel({
+  sites,
+  valeTypes,
+  maps,
+}: {
+  sites: Site[];
+  valeTypes: ValeTypeV2[];
+  maps: Maps | null;
+}) {
+  const rows = useMemo(() => {
+    if (!maps) return [];
+    const byTipo = new Map<string, { total: number; term: number; exe: number; sin: number; done: number; lines: number }>();
+    for (const s of sites) {
+      const prog = siteProgress(s, valeTypes, maps);
+      const lc = siteLineCounts(s, maps);
+      const k = s.house_type ?? "—";
+      const acc = byTipo.get(k) ?? { total: 0, term: 0, exe: 0, sin: 0, done: 0, lines: 0 };
+      acc.total++;
+      acc.done += lc.done;
+      acc.lines += lc.total;
+      if (prog.status === "terminado") acc.term++;
+      else if (prog.status === "en-ejecucion") acc.exe++;
+      else if (prog.status === "sin-iniciar") acc.sin++;
+      byTipo.set(k, acc);
+    }
+    return Array.from(byTipo.entries()).map(([tipo, v]) => ({
+      tipo,
+      total: v.total,
+      terminados: v.term,
+      enEjecucion: v.exe,
+      sinIniciar: v.sin,
+      pct: v.lines === 0 ? 0 : (v.done / v.lines) * 100,
+    }));
+  }, [sites, valeTypes, maps]);
+
+  const ctrl = useTableControls<(typeof rows)[number]>({
+    data: rows,
+    searchFields: (r) => [r.tipo],
+    sortFns: {
+      tipo: (a, b) => a.tipo.localeCompare(b.tipo),
+      total: (a, b) => a.total - b.total,
+      terminados: (a, b) => a.terminados - b.terminados,
+      enEjecucion: (a, b) => a.enEjecucion - b.enEjecucion,
+      sinIniciar: (a, b) => a.sinIniciar - b.sinIniciar,
+      pct: (a, b) => a.pct - b.pct,
+    },
+    defaultSort: { key: "tipo", dir: "asc" },
+    defaultPageSize: 10,
+  });
+
+  return (
+    <>
+      <SheetHeader>
+        <SheetTitle>Resumen por Tipo de Vivienda (Materiales Entregados)</SheetTitle>
+        <SheetDescription>Avance promedio y conteo de estados por tipo (A1, A2, B, C).</SheetDescription>
+      </SheetHeader>
+      <div className="mt-4 space-y-2">
+        <TableToolbar ctrl={ctrl} searchPlaceholder="Buscar tipo…" />
+        <div className="overflow-x-auto rounded-lg border">
+          <table className="w-full text-xs">
+            <thead className="bg-muted/40">
+              <tr>
+                <SortableTh ctrl={ctrl} sortKey="tipo">Tipo</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="total" align="right">Sitios</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="terminados" align="right">Terminados</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="enEjecucion" align="right">En ejec.</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="sinIniciar" align="right">Sin iniciar</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="pct" align="right">% Avance</SortableTh>
+              </tr>
+            </thead>
+            <tbody>
+              {ctrl.visible.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="p-4 text-center text-muted-foreground">Sin resultados</td>
+                </tr>
+              ) : (
+                ctrl.visible.map((r) => (
+                  <tr key={r.tipo} className="border-t">
+                    <td className="px-2 py-1.5 font-semibold">{r.tipo}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{r.total}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: TONE_TERM }}>{r.terminados}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: TONE_EXE }}>{r.enEjecucion}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums" style={{ color: TONE_SIN }}>{r.sinIniciar}</td>
+                    <td className="px-2 py-1.5 text-right"><div className="flex justify-end"><ProgressBadge pct={r.pct} /></div></td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        <TablePagination ctrl={ctrl} />
+      </div>
+    </>
+  );
+}
+
+function DetallesSitioPanel({
+  sites,
+  valeTypes,
+  maps,
+}: {
+  sites: Site[];
+  valeTypes: ValeTypeV2[];
+  maps: Maps | null;
+}) {
+  const rows = useMemo(() => {
+    if (!maps) return [];
+    return sites.map((s) => {
+      const prog = siteProgress(s, valeTypes, maps);
+      const lc = siteLineCounts(s, maps);
+      return {
+        key: `${s.manzana}-${s.sitio}`,
+        manzana: s.manzana,
+        sitio: s.sitio,
+        tipo: s.house_type ?? "—",
+        pct: lc.total === 0 ? 0 : (lc.done / lc.total) * 100,
+        estado: STATUS_LABEL[prog.status],
+        estadoKey: prog.status,
+        completos: prog.completos,
+        aplicable: prog.applicable,
+        valesTxt: `${prog.completos}/${prog.applicable}`,
+      };
+    });
+  }, [sites, valeTypes, maps]);
+
+  const ctrl = useTableControls<(typeof rows)[number]>({
+    data: rows,
+    searchFields: (r) => [String(r.manzana), r.sitio, r.tipo, r.estado],
+    sortFns: {
+      manzana: (a, b) => a.manzana - b.manzana,
+      sitio: (a, b) => a.sitio.localeCompare(b.sitio, undefined, { numeric: true }),
+      tipo: (a, b) => a.tipo.localeCompare(b.tipo),
+      estado: (a, b) => a.estado.localeCompare(b.estado),
+      completos: (a, b) => a.completos - b.completos,
+      pct: (a, b) => a.pct - b.pct,
+    },
+    defaultSort: { key: "pct", dir: "desc" },
+    defaultPageSize: 10,
+  });
+
+  return (
+    <>
+      <SheetHeader>
+        <SheetTitle>Resumen por Sitio</SheetTitle>
+        <SheetDescription>Listado completo de sitios con su avance y estado actual.</SheetDescription>
+      </SheetHeader>
+      <div className="mt-4 space-y-2">
+        <TableToolbar ctrl={ctrl} searchPlaceholder="Buscar manzana, sitio, tipo, estado…" />
+        <div className="overflow-x-auto rounded-lg border">
+          <table className="w-full text-xs">
+            <thead className="bg-muted/40">
+              <tr>
+                <SortableTh ctrl={ctrl} sortKey="manzana">Mz</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="sitio">Sitio</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="tipo">Tipo</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="estado">Estado</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="completos" align="right">Vales</SortableTh>
+                <SortableTh ctrl={ctrl} sortKey="pct" align="right">% Avance</SortableTh>
+              </tr>
+            </thead>
+            <tbody>
+              {ctrl.visible.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="p-4 text-center text-muted-foreground">Sin resultados</td>
+                </tr>
+              ) : (
+                ctrl.visible.map((r) => (
+                  <tr key={r.key} className="border-t">
+                    <td className="px-2 py-1.5 font-semibold">M{r.manzana}</td>
+                    <td className="px-2 py-1.5 tabular-nums">{r.sitio}</td>
+                    <td className="px-2 py-1.5">{r.tipo}</td>
+                    <td className="px-2 py-1.5">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="inline-block h-2 w-2 rounded-full" style={{ background: statusTone(r.estadoKey) }} />
+                        {r.estado}
+                      </span>
+                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{r.valesTxt}</td>
+                    <td className="px-2 py-1.5 text-right"><div className="flex justify-end"><ProgressBadge pct={r.pct} /></div></td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        <TablePagination ctrl={ctrl} />
+      </div>
+    </>
   );
 }
