@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Toaster } from "sonner";
 import { AppShell, type TabKey } from "@/components/app-shell";
 import { PassphraseProvider } from "@/components/passphrase-dialog";
@@ -16,6 +16,12 @@ import { ReportsSection } from "@/sections/reports";
 import { SimulatorSection } from "@/sections/simulator";
 import { PlanoSection } from "@/sections/plano";
 import { UsersSection } from "@/sections/users";
+
+// El Plano Real lleva una imagen de fondo pesada embebida: lo cargamos de forma
+// diferida para no afectar la carga inicial de la app.
+const PlanoRealSection = lazy(() =>
+  import("@/sections/plano-real").then((m) => ({ default: m.PlanoRealSection })),
+);
 import { useConfig } from "@/lib/queries";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -70,6 +76,15 @@ function Index() {
         }}
       >
         {effectiveTab === "plano" && <PlanoSection />}
+        {effectiveTab === "planoreal" && (
+          <Suspense
+            fallback={
+              <div className="p-6 text-sm text-muted-foreground">Cargando plano…</div>
+            }
+          >
+            <PlanoRealSection />
+          </Suspense>
+        )}
         {effectiveTab === "dashboard" && (
           <DashboardSection onNavigate={(t) => setTab(t)} />
         )}
