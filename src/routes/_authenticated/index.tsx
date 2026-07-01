@@ -22,6 +22,7 @@ const PlanoRealSection = lazy(() =>
   import("@/sections/plano-real").then((m) => ({ default: m.PlanoRealSection })),
 );
 import { useConfig } from "@/lib/queries";
+import { WorkProvider, ObraSelector, useWorkContext } from "@/lib/work-context";
 import { supabase } from "@/integrations/supabase/client";
 
 export const Route = createFileRoute("/_authenticated/")({
@@ -39,9 +40,19 @@ export const Route = createFileRoute("/_authenticated/")({
 });
 
 function Index() {
+  return (
+    <WorkProvider>
+      <IndexInner />
+    </WorkProvider>
+  );
+}
+
+function IndexInner() {
   const { user } = Route.useRouteContext();
   const [tab, setTab] = useState<TabKey>("dashboard");
   const cfg = useConfig();
+  const { works, workId } = useWorkContext();
+  const workName = works.find((w) => w.id === workId)?.name;
 
   const { data: isSuperadmin = false } = useQuery({
     queryKey: ["is-superadmin", user.id],
@@ -66,7 +77,7 @@ function Index() {
       <AppShell
         active={effectiveTab}
         onChange={setTab}
-        projectName={cfg.data?.name ?? "Mi Obra"}
+        projectName={workName ?? cfg.data?.name ?? "Mi Obra"}
         isSuperadmin={isSuperadmin}
         userEmail={user.email ?? ""}
         onSignOut={async () => {
@@ -74,6 +85,9 @@ function Index() {
           window.location.href = "/auth";
         }}
       >
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border bg-card px-3 py-2 shadow-sm">
+          <ObraSelector />
+        </div>
         {effectiveTab === "plano" && (
           <Suspense
             fallback={

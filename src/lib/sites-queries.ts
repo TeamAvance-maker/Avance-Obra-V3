@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
+import { useCurrentWorkId } from "./work-context";
 import type {
   MaterialV2,
   Site,
@@ -20,15 +21,16 @@ export const sqk = {
   siteDeliveryItems: ["v2", "site_delivery_items"] as const,
 };
 
-async function fetchAll<T>(table: string): Promise<T[]> {
+// Trae todas las filas de la tabla PERO solo de la obra indicada (multi-obra).
+async function fetchAllByWork<T>(table: string, workId: string): Promise<T[]> {
   const PAGE = 1000;
   const out: T[] = [];
   let from = 0;
   // Paginamos para evitar el límite por defecto de 1000 filas de PostgREST.
   for (;;) {
-    const { data, error } = await supabase
-      .from(table as never)
+    const { data, error } = await (supabase.from(table as never) as any)
       .select("*")
+      .eq("work_id", workId)
       .range(from, from + PAGE - 1);
     if (error) throw new Error(error.message);
     const rows = (data ?? []) as T[];
@@ -39,44 +41,68 @@ async function fetchAll<T>(table: string): Promise<T[]> {
   return out;
 }
 
-export const useSites = () =>
-  useQuery({ queryKey: sqk.sites, queryFn: () => fetchAll<Site>("sites") });
-
-export const useValeTypes = () =>
-  useQuery({
-    queryKey: sqk.valeTypes,
-    queryFn: () => fetchAll<ValeTypeV2>("vale_types_v2"),
+export const useSites = () => {
+  const w = useCurrentWorkId();
+  return useQuery({
+    queryKey: [...sqk.sites, w],
+    enabled: !!w,
+    queryFn: () => fetchAllByWork<Site>("sites", w!),
   });
+};
 
-export const useValeStages = () =>
-  useQuery({
-    queryKey: sqk.valeStages,
-    queryFn: () => fetchAll<ValeStage>("vale_stages"),
+export const useValeTypes = () => {
+  const w = useCurrentWorkId();
+  return useQuery({
+    queryKey: [...sqk.valeTypes, w],
+    enabled: !!w,
+    queryFn: () => fetchAllByWork<ValeTypeV2>("vale_types_v2", w!),
   });
+};
 
-export const useMaterialsV2 = () =>
-  useQuery({
-    queryKey: sqk.materials,
-    queryFn: () => fetchAll<MaterialV2>("materials_v2"),
+export const useValeStages = () => {
+  const w = useCurrentWorkId();
+  return useQuery({
+    queryKey: [...sqk.valeStages, w],
+    enabled: !!w,
+    queryFn: () => fetchAllByWork<ValeStage>("vale_stages", w!),
   });
+};
 
-export const useValeReqs = () =>
-  useQuery({
-    queryKey: sqk.valeReqs,
-    queryFn: () => fetchAll<ValeReq>("vale_reqs"),
+export const useMaterialsV2 = () => {
+  const w = useCurrentWorkId();
+  return useQuery({
+    queryKey: [...sqk.materials, w],
+    enabled: !!w,
+    queryFn: () => fetchAllByWork<MaterialV2>("materials_v2", w!),
   });
+};
 
-export const useSiteDeliveries = () =>
-  useQuery({
-    queryKey: sqk.siteDeliveries,
-    queryFn: () => fetchAll<SiteDelivery>("site_deliveries"),
+export const useValeReqs = () => {
+  const w = useCurrentWorkId();
+  return useQuery({
+    queryKey: [...sqk.valeReqs, w],
+    enabled: !!w,
+    queryFn: () => fetchAllByWork<ValeReq>("vale_reqs", w!),
   });
+};
 
-export const useSiteDeliveryItems = () =>
-  useQuery({
-    queryKey: sqk.siteDeliveryItems,
-    queryFn: () => fetchAll<SiteDeliveryItem>("site_delivery_items"),
+export const useSiteDeliveries = () => {
+  const w = useCurrentWorkId();
+  return useQuery({
+    queryKey: [...sqk.siteDeliveries, w],
+    enabled: !!w,
+    queryFn: () => fetchAllByWork<SiteDelivery>("site_deliveries", w!),
   });
+};
+
+export const useSiteDeliveryItems = () => {
+  const w = useCurrentWorkId();
+  return useQuery({
+    queryKey: [...sqk.siteDeliveryItems, w],
+    enabled: !!w,
+    queryFn: () => fetchAllByWork<SiteDeliveryItem>("site_delivery_items", w!),
+  });
+};
 
 export function useInvalidateSitesV2() {
   const qc = useQueryClient();
